@@ -1,7 +1,13 @@
 const express = require('express');
 const app = express();
+const http = require('http')
+const server = http.Server(app);
+const io = require('socket.io')(http);
+const bodyParser = require('body-parser');
 const { Client } = require('pg');
 const bcrypt = require('bcrypt');
+
+const Config = require('./config.json');
 
 const client = new Client({
   user: 'postgres',
@@ -22,12 +28,15 @@ client.connect(err => {
 
 app.use(express.json()) // for parsing application/json
 // app.use(express.urlencoded({ extended: true })) // for parsing application/x-www-form-urlencoded
+app.use(bodyParser.urlencoded({extended:false}));
+app.use(bodyParser.json());
+
+// app.use('/', express.static(__dirname + '/public'));
 
 bcrypt.hash('lundella', 10, function(err, hash) {
   // Store hash in your password DB.
   console.log(hash);
 });
-
 
 function parsePostgresTimeStamp(mobiusTime) {
   let postgresTimeFormat = {
@@ -44,51 +53,76 @@ function parsePostgresTimeStamp(mobiusTime) {
 }
 
 
+function getObjectsInSomeArea(area) {
+  let areaType = '';
+  if(area.radius) {
+    areaType = 'ST_DWithin(GPS, ST_MakePoint('+ area.gpsList +')::geography, '+ area.radius +')';
+  } else {
+    areaType = 'ST_Contains(ST_SetSRID(ST_MakePolygon(ST_GeomFromText(\'LINESTRING('+ area.gpsList +')\')), 4326), GPS)';
+  }
 
-app.get("/types", (req, res)=>{
-  client.query('SELECT * from model', (err, response) => {
-    if(err) {
-      console.log(err.stack);
-      res.status(500).send('Interneal Server Error by database.');
-      return;
-    }
-    res.status(200).send(response.rows);
+  return new Promise((resolve, reject)=>{
+    let searchObjectsFromAreaSql = 'SELECT type, count(type) FROM (SELECT locations.id, max(locations.time) as time FROM locations GROUP BY id) as lastvalue, locations ' +
+    'LEFT JOIN objects ON (objects.id = locations.id) WHERE lastvalue.time=locations.time and ' +
+    areaType + ' GROUP BY type';
+
+    console.log('area search: ', searchObjectsFromAreaSql);
+
+    client.query(searchObjectsFromAreaSql)
+    .then(response => {
+      console.log(response.rows);
+      resolve(response.rows)
+    }).catch(e=>{
+      console.log(e.stack);
+      reject(e);
+    })
   })
+}
 
-})
+function getObjectsCounts(area) {
+  return new Promise((resolve, reject)=>{
+    let searchObjectsFromAreaSql = 'SELECT type, count(type) FROM (SELECT locations.id, max(locations.time) as time FROM locations GROUP BY id) as lastvalue, locations ' +
+    'LEFT JOIN objects ON (objects.id = locations.id) WHERE lastvalue.time=locations.time and ' +
+    'ST_Contains(ST_SetSRID(ST_MakePolygon(ST_GeomFromText(\'LINESTRING('+ area +')\')), 4326), GPS) GROUP BY type';
 
+    console.log('area search: ', searchObjectsFromAreaSql);
 
-app.post("/types", (req, res)=>{
-  const Keys = Object.keys(req.body);
-  const Columns =  Keys.join(',');  
-  const Values = Keys.reduce((total, key, index)=>{
-    if(index === 1) { total = '\''+ req.body[total] + '\''; }
-
-    if(Array.isArray(req.body[key])) {
-      value = ', ARRAY\[\''+ req.body[key].join('\',\'') + '\'\]';
-    } else {
-      value = ',\'' + req.body[key] + '\'';
-    }
-
-    return total + value;
+    client.query(searchObjectsFromAreaSql)
+    .then(response => {
+      console.log(response.rows);
+      resolve(response.rows)
+    }).catch(e=>{
+      console.log(e.stack);
+      reject(e);
+    })
   })
-
-  let sql = 'INSERT INTO model ('+ Columns + ') value (' + Values + ')'
-
-  client.query(sql, (err, response) => {
-    if (err) {
-      console.log(err.stack);
-      res.status(500).send('Interneal Server Error by database.');
-      return;
-    } 
-    console.log('Register Object Model');
-  })
-  res.status(200).send('Success Register Object Model');
-})
+}
 
 
 app.get("/objects", (req, res) => {
   let sql = 'SELECT * FROM objects';
+  let latitudeList = JSON.parse(req.query.lat);
+  let longitudeList = JSON.parse(req.query.lng);
+  let radius = req.query.radius;
+  let areaInfo = {
+    gpsList: '',
+    radius: null
+  };
+
+  if(latitudeList.length != longitudeList.length) {
+    res.status(400).send("Bad Request");
+  }
+
+  if(radius) {
+    areaInfo = {
+      gpsList: (longitudeList[0]? longitudeList[0]: longitudeList) + ', ' + (latitudeList[0]? latitudeList[0]: latitudeList),
+      radius: radius
+    }
+  } else {
+    for(let index = 0; index < latitudeList.length; index++) {
+      areaInfo.gpsList += (index? ', ': '') + longitudeList[index] + ' ' + latitudeList[index];
+    }
+  }
 
   console.log("GET/ objects API ");
   client.query(sql)
@@ -100,10 +134,214 @@ app.get("/objects", (req, res) => {
   })
 })
 
+
+
+
+
+/* GET Retrieve Types
+ * @returns [] object counts by types
+ */
+app.get("/objects/counts", (req, res) => {
+  let totalCountSql = 'SELECT type, count(*) FROM objects group by type';
+  let latitudeList = JSON.parse(req.query.lat);
+  let longitudeList = JSON.parse(req.query.lng);
+  let radius = req.query.radius;
+  let gpsList = '';
+  let latitude = [
+    latitudeList[0],
+    latitudeList[0],
+    latitudeList[1],
+    latitudeList[1],
+    latitudeList[0],
+  ];
+  let longitude = [
+    longitudeList[0],
+    longitudeList[1],
+    longitudeList[1],
+    longitudeList[0],
+    longitudeList[0],
+  ]
+
+  if(latitudeList.length != longitudeList.length) {
+    res.status(400).send("Bad Request");
+  }
+
+  for(let index = 0; index < latitude.length; index++) {
+    gpsList += (index? ', ': '') + longitude[index] + ' ' + latitude[index];
+  }
+
+
+
+  async function countData() {
+    let countData = {
+      total: {},
+      area: {}
+    }
+    await client.query(totalCountSql).then(totalCounts=>{
+      countData.total = totalCounts.rows;
+    });
+    await getObjectsCounts(gpsList).then(areaCounts=>{
+      countData.area = areaCounts;
+      console.log('get countData', countData);
+    }).then(_=>{
+      res.status(200).send(countData);
+    })
+  }
+
+  try {
+    countData();
+  } catch(e) {
+    res.status(400).send("Bad Request");
+  }
+
+  
+
+  // client.query(sql)
+  // .then(response => {
+  //   getObjectsInSomeArea(gpsList)
+
+  //   res.status(200).send(response.rows);
+  // }).catch(e => {
+  //   console.log(e.stack);
+  // })
+})
+
+/* POST Register Object
+ * @returns string message
+ */
+app.post("/objects", (req, res) => {
+  let body = req.body;
+  let options = {
+    hostname: Config.mobius.host,
+    port: Config.mobius.port,
+    path: '/resources/ae',
+    method: 'POST',
+    headers: {
+      "Accept": "application/json",
+      "X-M2M-Ri": "ketiketi",
+      "X-M2M-Origin": "S",
+      "Content-Type": ""
+    }
+  }
+
+  let oneM2MBody = {
+    ae: { "m2m:ae" : { "rn": body.id, "api": "0.2.481.2.0001.001.000111", "lbl": [body.type], "rr": true }},
+    cnt: { "m2m:cnt" : { "rn": "location" }},
+    sub: { "m2m:sub" : { "rn": "rtls_sub", "enc":{ "net":[3] }, "nu": ["http://localhost:7580/locations"] }}
+  }
+
+  function requestOneM2MCreation(resource, options) {
+    if(resource['m2m:ae']) {
+      options.path = '/resources/ae';
+      options.headers['Content-Type'] = 'application/json; ty=2'
+    } else if(resource['m2m:cnt']) { 
+      options.path = '/bada/' + body.id;
+      options.headers['Content-Type'] = 'application/json; ty=3'
+    } else if(resource['m2m:sub']) { 
+      options.path = '/bada/' + body.id + '/location';
+      options.headers['Content-Type'] = 'application/json; ty=23'
+    }
+
+    return new Promise((resolve, reject)=>{
+      try {
+        const httpRequest = http.request(options, (response)=> {
+          let data = '';
+      
+          response.setEncoding('utf8');
+          response.on('data', (chunk) => {
+            data += chunk;
+          }).on('end', ()=>{
+            console.log(typeof data);
+            if(typeof data != 'object') { console.log('Error : ', data); }
+            resolve(data);
+          })
+        })
+      
+        httpRequest.write(JSON.stringify(resource));
+        httpRequest.end();        
+      } catch(e) {
+        reject(e);
+      }
+    })
+  }
+
+  async function makeOneM2MResource() {
+    await requestOneM2MCreation(oneM2MBody.ae, options)
+    await requestOneM2MCreation(oneM2MBody.cnt, options)
+    await requestOneM2MCreation(oneM2MBody.sub, options)
+  }
+
+  makeOneM2MResource().then(_=>{   
+    let sql = 'INSERT INTO objects (id, name, type, attrs, image) values (\'' + 
+      body.id + '\', \'' + body.name + '\', \'' + body.type + '\', \'' + 
+      JSON.stringify(body.attrs) + '\', \'' + body.image +'\')';
+
+    client.query(sql)
+    .then(result=>{
+      res.send('Create Object Success');
+    }).catch(e=>{
+      console.log('Create Object Fail');
+      console.log(e.stack);
+      res.status(500).send('Internal Server Error');
+    })
+  });
+})
+
+/* GET Retrieve Types
+ * @param 
+ * @returns {} type list
+ */
+app.get("/types", (req, res)=>{
+  client.query('SELECT * from types', (err, response) => {
+    if(err) {
+      console.log(err.stack);
+      res.status(500).send('Interneal Server Error by database.');
+      return;
+    }
+    console.log(response.rows);
+    res.status(200).send(response.rows);
+  })
+})
+
+/* POST Register Type
+ * @param 
+ * @returns {} type list
+ */
+app.post("/types", (req, res)=>{
+  const Keys = Object.keys(req.body);
+  const Columns =  Keys.join(',');  
+  const Values = Keys.reduce((total, key, index)=>{
+    if(index === 1) { total = '\''+ req.body[total] + '\''; }
+
+    if(typeof req.body[key] === 'object') {
+      value = ',\'' + JSON.stringify(req.body[key]) + '\'';
+    } else {
+      value = ',\'' + req.body[key] + '\'';
+    }
+
+    return total + value;
+  })
+
+  let sql = 'INSERT INTO model ('+ Columns + ') values (' + Values + ')'
+
+  client.query(sql, (err, response) => {
+    if (err) {
+      console.log(err.stack);
+      res.status(500).send('Interneal Server Error by database.');
+      return;
+    } 
+    console.log('Register Object Model');
+    res.status(200).send('Success Register Object Model');
+  })
+})
+
+/* POST Receive Location Data
+ * @returns string message
+ */
 app.post("/locations", (req, res)=>{
   let data = req.body;
 
-  if(!data['m2m:sgn']) {
+  if(!data['m2m:sgn'] ||  !data['m2m:sgn'].nev) {
     res.status(400).send('Bada Request');
     return;
   }
@@ -114,7 +352,6 @@ app.post("/locations", (req, res)=>{
   let creationTime = parsePostgresTimeStamp(cinData.ct);
 
   let id = resources[1];
-  
   let locationData = {
     "id": id,
     "lat": cinContents.lat? cinContents.lat: cinContents.latitude? cinContents.latitude: null,
@@ -126,16 +363,22 @@ app.post("/locations", (req, res)=>{
     "status": cinContents.status? JSON.stringify(cinContents.status): {}
   }
   
-  let saveDataQuery = 'INSERT INTO locations (id, latitude, longitude, altitude, direction, velocity, time, status)' +
+  let saveDataQuery = 'INSERT INTO locations (id, latitude, longitude, altitude, direction, velocity, time, status, gps)' +
             ' values (\''+ id + '\', \'' + locationData.lat + '\', \'' + locationData.lng + '\', \'' + locationData.alt + '\', \'' + 
-            locationData.direction + '\', \'' + locationData.velocity + '\', \'' + locationData.time + '\', \'' + locationData.status +'\')';
+            locationData.direction + '\', \'' + locationData.velocity + '\', \'' + locationData.time + '\', \'' + locationData.status + 
+            '\', ST_SetSRID(ST_MakePoint('+parseFloat(locationData.lng)+','+parseFloat(locationData.lat)+'),4326))';
 
             console.log(saveDataQuery);
-
-
-  res.status(200).send('Received Location Data');
+  client.query(saveDataQuery)
+  .then(result=>{
+    res.status(200).send('Received Location Data');
+    console.log(result);
+  }).catch(e=>{
+    res.status(500).send('Internal Error');
+    console.log(e.stack);
+  })
 })
 
-app.listen(7580, ()=> {
+server.listen(7580, ()=> {
   console.log("RTLS-Server Start on port 7580");
 })
