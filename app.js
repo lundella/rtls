@@ -10,11 +10,11 @@ const bcrypt = require('bcrypt');
 const Config = require('./config.json');
 
 const client = new Client({
-  user: 'postgres',
-  host: 'localhost',
-  database: 'LocationData',
-  password: 'Opqr!234',
-  port: 5432,
+  "host": "203.254.173.111",
+  "port": 5432,
+  "user": "postgres",
+  "password": "Opqr!234",
+  "database": "LocationData"
 })
 
 client.connect(err => {
@@ -54,17 +54,17 @@ function parsePostgresTimeStamp(mobiusTime) {
 
 
 function getObjectsInSomeArea(area) {
-  let areaType = '';
-  if(area.radius) {
-    areaType = 'ST_DWithin(GPS, ST_MakePoint('+ area.gpsList +')::geography, '+ area.radius +')';
-  } else {
-    areaType = 'ST_Contains(ST_SetSRID(ST_MakePolygon(ST_GeomFromText(\'LINESTRING('+ area.gpsList +')\')), 4326), GPS)';
-  }
-
   return new Promise((resolve, reject)=>{
-    let searchObjectsFromAreaSql = 'SELECT type, count(type) FROM (SELECT locations.id, max(locations.time) as time FROM locations GROUP BY id) as lastvalue, locations ' +
-    'LEFT JOIN objects ON (objects.id = locations.id) WHERE lastvalue.time=locations.time and ' +
-    areaType + ' GROUP BY type';
+    let areaType = '';
+    if(area.radius) {
+      areaType = 'WHERE ST_DWithin(GPS, ST_MakePoint('+ area.gpsList +')::geography, '+ area.radius +')';
+    } else if(area.gpsList){
+      areaType = 'WHERE ST_Contains(ST_SetSRID(ST_MakePolygon(ST_GeomFromText(\'LINESTRING('+ area.gpsList +')\')), 4326), GPS)';
+    }
+
+    let searchObjectsFromAreaSql = 'SELECT objects.*, lastfullvalue.latitude, lastfullvalue.longitude, lastfullvalue.altitude, lastfullvalue.velocity, lastfullvalue.status, lastfullvalue.time AS statustime FROM objects ' +
+                                    'LEFT JOIN (select locations.* from (SELECT locations.id, max(locations.time) as time FROM locations GROUP BY id) as lastvalue, locations WHERE lastvalue.time=locations.time) AS lastfullvalue ' +
+                                    'ON objects.id=lastfullvalue.id ' + areaType;
 
     console.log('area search: ', searchObjectsFromAreaSql);
 
@@ -98,45 +98,105 @@ function getObjectsCounts(area) {
   })
 }
 
+function getObjectData(id) {
+  return new Promise((resolve, reject)=>{
+    let objectDataById = 'SELECT * FROM objects, (select locations.* from (SELECT locations.id, max(locations.time) as time FROM locations GROUP BY id) as lastvalue, locations ' +
+                          'WHERE lastvalue.time=locations.time) AS lastfullvalue WHERE objects.id=lastfullvalue.id and objects.id=\'' + id + '\'';
 
-app.get("/objects", (req, res) => {
-  let sql = 'SELECT * FROM objects';
-  let latitudeList = JSON.parse(req.query.lat);
-  let longitudeList = JSON.parse(req.query.lng);
-  let radius = req.query.radius;
-  let areaInfo = {
-    gpsList: '',
-    radius: null
-  };
+    client.query(objectDataById)
+    .then(response => {
+      console.log(response.rows);
+      resolve(response.rows[0]);
+    }).catch(e=>{
+      console.log(e.stack);
+      reject(e);
+    })
+  })
+}
 
-  if(latitudeList.length != longitudeList.length) {
-    res.status(400).send("Bad Request");
+
+
+app.get("/objects/:id/history", (req, res) => {
+  console.log(req.params.id);
+  console.log(req.query.startTime);
+  console.log(req.query.endTime);
+  if(!req.params.id) {
+    res.status(400).send("Bada Request");
   }
 
-  if(radius) {
-    areaInfo = {
-      gpsList: (longitudeList[0]? longitudeList[0]: longitudeList) + ', ' + (latitudeList[0]? latitudeList[0]: latitudeList),
-      radius: radius
-    }
-  } else {
-    for(let index = 0; index < latitudeList.length; index++) {
-      areaInfo.gpsList += (index? ', ': '') + longitudeList[index] + ' ' + latitudeList[index];
-    }
+
+
+  res.send("history");
+}) 
+
+
+/* GET Retrieve Types
+ * @returns {} object data
+ */
+app.get("/objects/:id", (req, res) => {
+  if(!req.params.id) {
+    res.status(400).send("Bada Request");
   }
 
-  console.log("GET/ objects API ");
-  client.query(sql)
-  .then(response => {
-    console.log(response.rows);
-    res.send(response.rows);
-  }).catch(e=>{
-    console.log(e.stack);
+  let id = req.params.id;
+
+  getObjectData(id).then(response=>{
+    res.send(response);
+  }).catch(e => {
+    res.status(400).send(e.stack);
   })
 })
 
+/* GET Retrieve Types
+ * @returns [] objects data
+ */
+app.get("/objects", (req, res) => {  
+  let areaInfo = {
+    gpsList: '',
+    radius: req.query.radius
+  };
 
+  if ((!req.query.lat && req.query.lng) || (req.query.lat && !req.query.lng)) {
+    res.status(400).send("Bad Request");
+  }
+  
+  if(req.query.lat.length === req.query.lat.length) {
+    let latitudeList = JSON.parse(req.query.lat);
+    let longitudeList = JSON.parse(req.query.lng);
+  
+    let latitude = [
+      latitudeList[0],
+      latitudeList[0],
+      latitudeList[1],
+      latitudeList[1],
+      latitudeList[0],
+    ];
+    let longitude = [
+      longitudeList[0],
+      longitudeList[1],
+      longitudeList[1],
+      longitudeList[0],
+      longitudeList[0],
+    ]
+  
+    if(areaInfo.radius) {
+      areaInfo = {
+        gpsList: (longitudeList[0]? longitudeList[0]: longitudeList) + ', ' + (latitudeList[0]? latitudeList[0]: latitudeList),
+        radius: radius
+      }
+    } else {
+      for(let index = 0; index < latitude.length; index++) {
+        areaInfo.gpsList += (index? ', ': '') + longitude[index] + ' ' + latitude[index];
+      }
+    }
+  }
 
-
+  getObjectsInSomeArea(areaInfo).then(response => {
+    res.send(response);
+  }).catch(e => {
+    res.status(400).send(e.stack);
+  })
+})
 
 /* GET Retrieve Types
  * @returns [] object counts by types
@@ -170,8 +230,6 @@ app.get("/objects/counts", (req, res) => {
     gpsList += (index? ', ': '') + longitude[index] + ' ' + latitude[index];
   }
 
-
-
   async function countData() {
     let countData = {
       total: {},
@@ -193,17 +251,6 @@ app.get("/objects/counts", (req, res) => {
   } catch(e) {
     res.status(400).send("Bad Request");
   }
-
-  
-
-  // client.query(sql)
-  // .then(response => {
-  //   getObjectsInSomeArea(gpsList)
-
-  //   res.status(200).send(response.rows);
-  // }).catch(e => {
-  //   console.log(e.stack);
-  // })
 })
 
 /* POST Register Object
@@ -379,6 +426,6 @@ app.post("/locations", (req, res)=>{
   })
 })
 
-server.listen(7580, ()=> {
-  console.log("RTLS-Server Start on port 7580");
+server.listen(7979, ()=> {
+  console.log("RTLS-Server Start on port 7979");
 })
