@@ -3,5 +3,19 @@
     "host": "203.254.173.111",
     "port": 7576,
     "cb": "bada"
+  },
+  "database": {
+    "host": "203.254.173.111",
+    "port": 5432,
+    "user": "postgres",
+    "password": "Opqr!234",
+    "database": "LocationData"
+  },
+  "operation_database": {
+    "host": "203.254.173.5",
+    "port": 5432,
+    "user": "postgres",
+    "password": "Cotlab12#$",
+    "database": "SpatialData"
   }
 }
