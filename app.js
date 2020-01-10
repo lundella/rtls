@@ -79,6 +79,7 @@ function getObjectsInSomeArea(area) {
                                     'LEFT JOIN (select locations.* from (SELECT locations.id, max(locations.time) as time FROM locations GROUP BY id) as lastvalue, locations WHERE lastvalue.time=locations.time AND lastvalue.id=locations.id) AS lastfullvalue ' +
                                     'ON objects.id=lastfullvalue.id ' + areaType;
 
+    console.log(searchObjectsFromAreaSql);
     client.query(searchObjectsFromAreaSql)
     .then(response => {
       console.log(response.rows);
@@ -153,12 +154,12 @@ function getObjectsDatabyArea(area, duration, condition) {
     
     let locationDataAreaSql = 'SELECT * FROM (SELECT objects.id, objects.name, objects.type, locations.latitude, locations.longitude, locations.altitude, locations.velocity, locations.status, locations.time AS time ' +
                               ' FROM locations LEFT JOIN objects ON objects.id=locations.id ' + whereClause + ') AS information' +
-                              ' ORDER BY ' + condition.standard + ' ' + condition.order + ' LIMIT ' + condition.limit + ' OFFSET ' + ((condition.page-1) * condition.limit);
+                              ' ORDER BY ' + condition.standard + ' ' + condition.order + condition.limit;
   
-    console.log(locationDataAreaSql);
     client.query(locationDataAreaSql)
     .then(response => {
-      resolve(response.rows);
+      let result = response.rows.length? response.rows: null
+      resolve(result);
     }).catch(e=>{
       console.log(e.stack);
       reject(e);
@@ -192,7 +193,7 @@ function validUser(password, cb) {
 
 async function multipleQuery(id) {
   let returnedData = {};
-  returnedData.object = await client.query('SELECT * FROM objects WHERE id=\'' + id + '\'')
+  returnedData = await client.query('SELECT * FROM objects WHERE id=\'' + id + '\'')
   .then(res => { 
     let objectInfo = null;
     if(res.rows[0]) {
@@ -208,6 +209,7 @@ async function multipleQuery(id) {
                                             'WHERE lasttime.time=messages.time')
   .then(res => { 
     let messageInfo = null;
+
     if(res.rows[0]) {
       messageInfo = res.rows[0];
       messageInfo.time = moment(messageInfo.time).format("YYYY-MM-DD HH:mm:ss.sss");
@@ -227,6 +229,7 @@ async function multipleQuery(id) {
       locationInfo.time = moment(locationInfo.time).format("YYYY-MM-DD HH:mm:ss.sss");
       delete locationInfo.gps;
       delete locationInfo.id;
+      delete locationInfo.name;
     }
     return locationInfo;
   });
@@ -548,8 +551,7 @@ app.get("/objects/history", (req, res) => {
   let searchCondition = {
     standard: req.query.standard? req.query.standard: "time",
     order: req.query.order? req.query.order: "DESC",
-    page: req.query.page? req.query.page: 1,
-    limit: req.query.limit? req.query.limit: 10
+    limit: req.query.limit? ' LIMIT ' + req.query.limit + ' OFFSET ' + (req.query.page? ((req.query.page-1) * req.query.limit): 0) +'' : '',
   }
 
   let duration = {
@@ -626,8 +628,7 @@ app.get("/object/:id/history", (req, res) => {
   let searchCondition = {
     standard: req.query.standard? req.query.standard: "time",
     order: req.query.order? req.query.order: "DESC",
-    page: req.query.page? req.query.page: 1,
-    limit: req.query.limit? req.query.limit: 10
+    limit: req.query.limit? ' LIMIT ' + req.query.limit + ' OFFSET ' + (req.query.page? ((req.query.page-1) * req.query.limit): 0) +'' : '',
   }
 
   if(req.query.startTime) {
@@ -638,15 +639,17 @@ app.get("/object/:id/history", (req, res) => {
   }
 
   historyFromIdSql += whereClause;
-  historyFromIdSql += ' ORDER BY ' + searchCondition.standard + ' ' + searchCondition.order + ' LIMIT ' + searchCondition.limit + ' OFFSET ' + ((searchCondition.page-1) * searchCondition.limit);
+  historyFromIdSql += ' ORDER BY ' + searchCondition.standard + ' ' + searchCondition.order + searchCondition.limit;
 
   client.query(historyFromIdSql)
   .then(response => {
+    let result;
     if(!response.rowCount) {
-      res.send("No Data");  
+      result = null;
     } else {
-      res.send(response.rows);
+      result = response.rows;
     }
+    res.send(result);
   }).catch(e=>{
     console.log(e.stack);
     res.status(400).send("Bad Request");
@@ -687,11 +690,17 @@ app.get("/objects", (req, res) => {
     radius: req.query.radius? req.query.radius: undefined
   };
 
+  let searchCondition = {
+    standard: req.query.standard? req.query.standard: "time",
+    order: req.query.order? req.query.order: "DESC",
+    limit: req.query.limit? ' LIMIT ' + req.query.limit + ' OFFSET ' + (req.query.page? ((req.query.page-1) * req.query.limit): 0) +'' : '',
+    keyword: req.query.keyword? 'WHERE id LIKE \'%' + req.query.keyword + '%\'': '',
+  }
+
   if ((!latitudeList && longitudeList) || (latitudeList && !longitudeList)) {
     res.status(400).send("Bad Request");
     return;
   }
-
   
   if((latitudeList.length == 1) && (longitudeList.length == 1) && !areaInfo.radius) {
     res.status(400).send("Bad Request");
@@ -699,11 +708,11 @@ app.get("/objects", (req, res) => {
   }
   
   if (!latitudeList && !longitudeList) {
-    let getObjectsDataSql = 'SELECT * FROM objects';
+    let getObjectsDataSql = 'SELECT * FROM objects '+ searchCondition.keyword +' ORDER BY ' + searchCondition.standard + ' ' + searchCondition.order + searchCondition.limit
 
+    console.log(getObjectsDataSql);
     client.query(getObjectsDataSql)
     .then(response => {
-      console.log(response.rows);
       res.send(response.rows);
     })
   } else if(latitudeList.length === longitudeList.length) {
